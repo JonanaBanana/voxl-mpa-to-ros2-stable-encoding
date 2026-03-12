@@ -39,6 +39,7 @@
 #include <image_transport/publisher.hpp>
 #include <sensor_msgs/msg/compressed_image.hpp>
 #include <rclcpp/rclcpp.hpp>
+#include <vector>
 
 #include "voxl_mpa_to_ros2/interfaces/generic_interface.hpp"
 
@@ -74,6 +75,12 @@ public:
 
     const char * ginterface_name;
     int frame_format;
+
+    // Cached SPS+PPS (H264) and VPS+SPS+PPS (H265) packets.
+    // Re-published before every IDR frame so late-joining subscribers
+    // always receive parameter sets within one I-frame interval.
+    std::vector<uint8_t> m_h264_param_cache;
+    std::vector<uint8_t> m_h265_param_cache;
 
 private:
 

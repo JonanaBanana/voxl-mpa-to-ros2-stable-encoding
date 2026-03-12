@@ -40,6 +40,76 @@
 #include "voxl_mpa_to_ros2/utils/camera_helpers.h"
 #include "voxl_mpa_to_ros2/interfaces/camera_interface.hpp"
 
+// ---------------------------------------------------------------------------
+// Annex-B NAL unit helpers for SPS/PPS re-injection.
+//
+// voxl-camera-server sends parameter sets (SPS/PPS for H264, VPS/SPS/PPS for
+// H265) only once at stream startup.  With TRANSIENT_LOCAL depth 300 they are
+// evicted from history after ~10s at 30fps, causing late-joining subscribers
+// to miss them and fail to decode.
+//
+// Fix: cache the parameter set packet and re-publish it before every IDR/CRA
+// frame.  Cost is negligible — SPS/PPS packets are ~50-100 bytes and IDR
+// frames arrive at most 6x/second (nPframes=4 at 30fps).
+// ---------------------------------------------------------------------------
+
+// Returns the byte offset of the next Annex-B start code at or after i,
+// and sets sc_len to 3 or 4.  Returns `size` if none found.
+static size_t next_nal(const uint8_t * d, size_t size, size_t i, size_t & sc_len)
+{
+    while (i + 3 <= size) {
+        if (d[i]==0 && d[i+1]==0 && d[i+2]==1)
+            { sc_len = 3; return i; }
+        if (i + 4 <= size && d[i]==0 && d[i+1]==0 && d[i+2]==0 && d[i+3]==1)
+            { sc_len = 4; return i; }
+        ++i;
+    }
+    return size;
+}
+
+// H264 NAL type = first_byte & 0x1F.  SPS=7, PPS=8, IDR=5.
+static bool h264_contains_param_sets(const uint8_t * d, int sz)
+{
+    size_t i = 0, sc;
+    while ((i = next_nal(d, sz, i, sc)) < (size_t)sz) {
+        uint8_t t = d[i + sc] & 0x1F;
+        if (t == 7 || t == 8) return true;
+        i += sc + 1;
+    }
+    return false;
+}
+static bool h264_is_idr(const uint8_t * d, int sz)
+{
+    size_t i = 0, sc;
+    while ((i = next_nal(d, sz, i, sc)) < (size_t)sz) {
+        if ((d[i + sc] & 0x1F) == 5) return true;
+        i += sc + 1;
+    }
+    return false;
+}
+
+// H265 NAL type = (first_byte >> 1) & 0x3F.  VPS=32, SPS=33, PPS=34, IDR=19,20.
+static bool h265_contains_param_sets(const uint8_t * d, int sz)
+{
+    size_t i = 0, sc;
+    while ((i = next_nal(d, sz, i, sc)) < (size_t)sz) {
+        uint8_t t = (d[i + sc] >> 1) & 0x3F;
+        if (t == 32 || t == 33 || t == 34) return true;
+        i += sc + 1;
+    }
+    return false;
+}
+static bool h265_is_idr(const uint8_t * d, int sz)
+{
+    size_t i = 0, sc;
+    while ((i = next_nal(d, sz, i, sc)) < (size_t)sz) {
+        uint8_t t = (d[i + sc] >> 1) & 0x3F;
+        if (t == 19 || t == 20) return true;
+        i += sc + 1;
+    }
+    return false;
+}
+
 static void _frame_cb(
     __attribute__((unused)) int ch,
                             camera_image_metadata_t meta,
@@ -56,6 +126,8 @@ CameraInterface::CameraInterface(
 
     m_imageMsg.header.frame_id = name;
     m_imageMsg.is_bigendian    = false;
+    m_h264_param_cache.clear();
+    m_h265_param_cache.clear();
     
     ginterface_name = name;
 
@@ -268,23 +340,58 @@ static void _frame_cb(
         publisher.publish(img);
 
     } else if (meta.format == IMAGE_FORMAT_H264) {
+        const uint8_t * data = reinterpret_cast<const uint8_t *>(frame);
+        const int       size = meta.size_bytes;
+
+        // Cache the SPS+PPS packet the first time we see it.
+        if (interface->m_h264_param_cache.empty() && h264_contains_param_sets(data, size))
+            interface->m_h264_param_cache.assign(data, data + size);
+
+        // Re-inject cached SPS+PPS immediately before every IDR frame so any
+        // subscriber that joins mid-stream receives parameter sets within one
+        // I-frame interval (~167ms at 30fps with nPframes=4), regardless of
+        // how long the publisher has been running.
+        if (h264_is_idr(data, size) && !interface->m_h264_param_cache.empty()) {
+            sensor_msgs::msg::CompressedImage ps_msg;
+            ps_msg.header.frame_id = interface->ginterface_name;
+            ps_msg.header.stamp    = _clock_monotonic_to_ros_time(interface->getNodeHandle(), meta.timestamp_ns);
+            ps_msg.format          = GetRosFormat(IMAGE_FORMAT_H264);
+            ps_msg.data            = interface->m_h264_param_cache;
+            compressed_publisher->publish(ps_msg);
+        }
+
         sensor_msgs::msg::CompressedImage msg;
-	msg.header.frame_id = interface->ginterface_name;
-	msg.header.stamp    = _clock_monotonic_to_ros_time(interface->getNodeHandle(), meta.timestamp_ns);
-	msg.format          = GetRosFormat(IMAGE_FORMAT_H264);
-	msg.data.resize(meta.size_bytes);
-	memcpy(msg.data.data(), frame, meta.size_bytes);
-	compressed_publisher->publish(msg);
+        msg.header.frame_id = interface->ginterface_name;
+        msg.header.stamp    = _clock_monotonic_to_ros_time(interface->getNodeHandle(), meta.timestamp_ns);
+        msg.format          = GetRosFormat(IMAGE_FORMAT_H264);
+        msg.data.resize(size);
+        memcpy(msg.data.data(), frame, size);
+        compressed_publisher->publish(msg);
 
 
     } else if (meta.format == IMAGE_FORMAT_H265) {
+        const uint8_t * data = reinterpret_cast<const uint8_t *>(frame);
+        const int       size = meta.size_bytes;
+
+        if (interface->m_h265_param_cache.empty() && h265_contains_param_sets(data, size))
+            interface->m_h265_param_cache.assign(data, data + size);
+
+        if (h265_is_idr(data, size) && !interface->m_h265_param_cache.empty()) {
+            sensor_msgs::msg::CompressedImage ps_msg;
+            ps_msg.header.frame_id = interface->ginterface_name;
+            ps_msg.header.stamp    = _clock_monotonic_to_ros_time(interface->getNodeHandle(), meta.timestamp_ns);
+            ps_msg.format          = GetRosFormat(IMAGE_FORMAT_H265);
+            ps_msg.data            = interface->m_h265_param_cache;
+            compressed_publisher->publish(ps_msg);
+        }
+
         sensor_msgs::msg::CompressedImage msg;
-	msg.header.frame_id = interface->ginterface_name;
-	msg.header.stamp    = _clock_monotonic_to_ros_time(interface->getNodeHandle(), meta.timestamp_ns);
-	msg.format          = GetRosFormat(IMAGE_FORMAT_H265);
-	msg.data.resize(meta.size_bytes);
-	memcpy(msg.data.data(), frame, meta.size_bytes);
-	compressed_publisher->publish(msg);
+        msg.header.frame_id = interface->ginterface_name;
+        msg.header.stamp    = _clock_monotonic_to_ros_time(interface->getNodeHandle(), meta.timestamp_ns);
+        msg.format          = GetRosFormat(IMAGE_FORMAT_H265);
+        msg.data.resize(size);
+        memcpy(msg.data.data(), frame, size);
+        compressed_publisher->publish(msg);
 
     } else {
 
