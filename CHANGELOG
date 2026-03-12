@@ -1,0 +1,16 @@
+0.0.7
+    * tag detections
+0.0.6
+    * fix build depends
+0.0.5
+    * compressed image fixes
+0.0.4
+    * updated submodules
+    * bashrc updates
+0.0.3
+    * correct monotonic timestamp to ros time
+    * add YUV422 support
+0.0.2
+    * add voxl-ros2-foxy dependency to deb package to fix build chain
+0.0.1
+    * baseline transfer of all mpa pipes to ros2
