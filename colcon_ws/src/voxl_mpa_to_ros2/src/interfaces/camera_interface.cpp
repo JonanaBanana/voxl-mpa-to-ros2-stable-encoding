@@ -208,6 +208,21 @@ static void _frame_cb(
 
     CameraInterface *interface = (CameraInterface *) context;
 
+    // Always cache parameter sets regardless of publishing state.
+    // voxl-camera-server sends SPS+PPS (H264) or VPS+SPS+PPS (H265) once at
+    // stream startup — well before any subscriber connects and the interface
+    // transitions to ST_RUNNING.  Without this pre-guard cache, the param set
+    // packet is dropped and m_h264/h265_param_cache stays empty forever.
+    if (meta.format == IMAGE_FORMAT_H264) {
+        const uint8_t * data = reinterpret_cast<const uint8_t *>(frame);
+        if (interface->m_h264_param_cache.empty() && h264_contains_param_sets(data, meta.size_bytes))
+            interface->m_h264_param_cache.assign(data, data + meta.size_bytes);
+    } else if (meta.format == IMAGE_FORMAT_H265) {
+        const uint8_t * data = reinterpret_cast<const uint8_t *>(frame);
+        if (interface->m_h265_param_cache.empty() && h265_contains_param_sets(data, meta.size_bytes))
+            interface->m_h265_param_cache.assign(data, data + meta.size_bytes);
+    }
+
     if(interface->GetState() != ST_RUNNING) return;
 
     image_transport::Publisher& publisher = interface->GetPublisher();
@@ -343,15 +358,9 @@ static void _frame_cb(
         const uint8_t * data = reinterpret_cast<const uint8_t *>(frame);
         const int       size = meta.size_bytes;
 
-        // Cache the SPS+PPS packet the first time we see it.
-        if (interface->m_h264_param_cache.empty() && h264_contains_param_sets(data, size))
-            interface->m_h264_param_cache.assign(data, data + size);
-
-        // Re-inject cached SPS+PPS immediately before every IDR frame so any
-        // subscriber that joins mid-stream receives parameter sets within one
-        // I-frame interval (~167ms at 30fps with nPframes=4), regardless of
-        // how long the publisher has been running.
-        if (h264_is_idr(data, size) && !interface->m_h264_param_cache.empty()) {
+        // Re-inject cached SPS+PPS before EVERY frame (not just IDR).
+        // Cache is always populated before ST_RUNNING is reached (see above).
+        if (!interface->m_h264_param_cache.empty()) {
             sensor_msgs::msg::CompressedImage ps_msg;
             ps_msg.header.frame_id = interface->ginterface_name;
             ps_msg.header.stamp    = _clock_monotonic_to_ros_time(interface->getNodeHandle(), meta.timestamp_ns);
@@ -373,10 +382,9 @@ static void _frame_cb(
         const uint8_t * data = reinterpret_cast<const uint8_t *>(frame);
         const int       size = meta.size_bytes;
 
-        if (interface->m_h265_param_cache.empty() && h265_contains_param_sets(data, size))
-            interface->m_h265_param_cache.assign(data, data + size);
-
-        if (h265_is_idr(data, size) && !interface->m_h265_param_cache.empty()) {
+        // Re-inject cached VPS+SPS+PPS before every frame.
+        // Cache is always populated before ST_RUNNING is reached (see above).
+        if (!interface->m_h265_param_cache.empty()) {
             sensor_msgs::msg::CompressedImage ps_msg;
             ps_msg.header.frame_id = interface->ginterface_name;
             ps_msg.header.stamp    = _clock_monotonic_to_ros_time(interface->getNodeHandle(), meta.timestamp_ns);
