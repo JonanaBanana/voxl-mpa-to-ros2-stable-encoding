@@ -121,15 +121,12 @@ CameraInterface::CameraInterface(
     const char *    name) :
     GenericInterface(nh, name)
 {
-    // Generic interface name
     ginterface_name = name;
 
     m_imageMsg.header.frame_id = name;
     m_imageMsg.is_bigendian    = false;
     m_h264_param_cache.clear();
     m_h265_param_cache.clear();
-    
-    ginterface_name = name;
 
     pipe_client_set_camera_helper_cb(m_channel, _frame_cb, this);
 
@@ -358,9 +355,10 @@ static void _frame_cb(
         const uint8_t * data = reinterpret_cast<const uint8_t *>(frame);
         const int       size = meta.size_bytes;
 
-        // Re-inject cached SPS+PPS before EVERY frame (not just IDR).
-        // Cache is always populated before ST_RUNNING is reached (see above).
-        if (!interface->m_h264_param_cache.empty()) {
+        // Re-inject cached SPS+PPS before every IDR frame so that a
+        // late-joining subscriber receives parameter sets and an IDR
+        // in the same burst — exactly what a decoder needs to sync.
+        if (!interface->m_h264_param_cache.empty() && h264_is_idr(data, size)) {
             sensor_msgs::msg::CompressedImage ps_msg;
             ps_msg.header.frame_id = interface->ginterface_name;
             ps_msg.header.stamp    = _clock_monotonic_to_ros_time(interface->getNodeHandle(), meta.timestamp_ns);
@@ -382,9 +380,10 @@ static void _frame_cb(
         const uint8_t * data = reinterpret_cast<const uint8_t *>(frame);
         const int       size = meta.size_bytes;
 
-        // Re-inject cached VPS+SPS+PPS before every frame.
-        // Cache is always populated before ST_RUNNING is reached (see above).
-        if (!interface->m_h265_param_cache.empty()) {
+        // Re-inject cached VPS+SPS+PPS before every IDR/CRA frame so that a
+        // late-joining subscriber receives parameter sets and an IDR
+        // in the same burst — exactly what a decoder needs to sync.
+        if (!interface->m_h265_param_cache.empty() && h265_is_idr(data, size)) {
             sensor_msgs::msg::CompressedImage ps_msg;
             ps_msg.header.frame_id = interface->ginterface_name;
             ps_msg.header.stamp    = _clock_monotonic_to_ros_time(interface->getNodeHandle(), meta.timestamp_ns);

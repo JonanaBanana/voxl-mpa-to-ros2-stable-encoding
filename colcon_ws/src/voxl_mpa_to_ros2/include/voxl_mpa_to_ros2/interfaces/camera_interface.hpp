@@ -84,7 +84,6 @@ public:
 
 private:
 
-    sensor_msgs::msg::CompressedImage                     m_compressedImage;   ///< Compressed Image message
     sensor_msgs::msg::Image                     m_imageMsg;                   ///< Image message
     sensor_msgs::msg::CompressedImage           m_compressedImageMsg;         ///< Compressed Image message
     image_transport::Publisher             m_rosImagePublisher;               ///< Image publisher
