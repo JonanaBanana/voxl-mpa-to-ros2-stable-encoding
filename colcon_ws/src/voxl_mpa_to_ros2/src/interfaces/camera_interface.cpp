@@ -48,9 +48,9 @@
 // evicted from history after ~10s at 30fps, causing late-joining subscribers
 // to miss them and fail to decode.
 //
-// Fix: cache the parameter set packet and re-publish it before every IDR/CRA
-// frame.  Cost is negligible — SPS/PPS packets are ~50-100 bytes and IDR
-// frames arrive at most 6x/second (nPframes=4 at 30fps).
+// Fix: cache the parameter set packet and re-publish it every
+// m_param_inject_interval frames (default 10).  Cost is negligible —
+// SPS/PPS packets are ~50-100 bytes.
 // ---------------------------------------------------------------------------
 
 // Returns the byte offset of the next Annex-B start code at or after i,
@@ -78,16 +78,6 @@ static bool h264_contains_param_sets(const uint8_t * d, int sz)
     }
     return false;
 }
-static bool h264_is_idr(const uint8_t * d, int sz)
-{
-    size_t i = 0, sc;
-    while ((i = next_nal(d, sz, i, sc)) < (size_t)sz) {
-        if ((d[i + sc] & 0x1F) == 5) return true;
-        i += sc + 1;
-    }
-    return false;
-}
-
 // H265 NAL type = (first_byte >> 1) & 0x3F.  VPS=32, SPS=33, PPS=34, IDR=19,20.
 static bool h265_contains_param_sets(const uint8_t * d, int sz)
 {
@@ -99,17 +89,6 @@ static bool h265_contains_param_sets(const uint8_t * d, int sz)
     }
     return false;
 }
-static bool h265_is_idr(const uint8_t * d, int sz)
-{
-    size_t i = 0, sc;
-    while ((i = next_nal(d, sz, i, sc)) < (size_t)sz) {
-        uint8_t t = (d[i + sc] >> 1) & 0x3F;
-        if (t == 19 || t == 20) return true;
-        i += sc + 1;
-    }
-    return false;
-}
-
 static void _frame_cb(
     __attribute__((unused)) int ch,
                             camera_image_metadata_t meta,
@@ -121,15 +100,10 @@ CameraInterface::CameraInterface(
     const char *    name) :
     GenericInterface(nh, name)
 {
-    // Generic interface name
     ginterface_name = name;
 
     m_imageMsg.header.frame_id = name;
     m_imageMsg.is_bigendian    = false;
-    m_h264_param_cache.clear();
-    m_h265_param_cache.clear();
-    
-    ginterface_name = name;
 
     pipe_client_set_camera_helper_cb(m_channel, _frame_cb, this);
 
@@ -229,7 +203,6 @@ static void _frame_cb(
     sensor_msgs::msg::Image& img = interface->GetImageMsg();
 
     rclcpp::Publisher<sensor_msgs::msg::CompressedImage>::SharedPtr& compressed_publisher = interface->GetCompressedPublisher();
-    sensor_msgs::msg::CompressedImage& compressedImage = interface->GetCompressedImageMsg();
 
     img.header.stamp = _clock_monotonic_to_ros_time(interface->getNodeHandle(), meta.timestamp_ns);
     img.width    = meta.width;
@@ -355,12 +328,12 @@ static void _frame_cb(
         publisher.publish(img);
 
     } else if (meta.format == IMAGE_FORMAT_H264) {
-        const uint8_t * data = reinterpret_cast<const uint8_t *>(frame);
-        const int       size = meta.size_bytes;
+        const int size = meta.size_bytes;
 
-        // Re-inject cached SPS+PPS before EVERY frame (not just IDR).
-        // Cache is always populated before ST_RUNNING is reached (see above).
-        if (!interface->m_h264_param_cache.empty()) {
+        // Re-inject cached SPS+PPS every m_param_inject_interval frames so
+        // late-joining subscribers can always latch on within a short window.
+        if (!interface->m_h264_param_cache.empty() &&
+            (interface->m_encoded_frame_count % interface->m_param_inject_interval == 0)) {
             sensor_msgs::msg::CompressedImage ps_msg;
             ps_msg.header.frame_id = interface->ginterface_name;
             ps_msg.header.stamp    = _clock_monotonic_to_ros_time(interface->getNodeHandle(), meta.timestamp_ns);
@@ -376,15 +349,15 @@ static void _frame_cb(
         msg.data.resize(size);
         memcpy(msg.data.data(), frame, size);
         compressed_publisher->publish(msg);
-
+        interface->m_encoded_frame_count++;
 
     } else if (meta.format == IMAGE_FORMAT_H265) {
-        const uint8_t * data = reinterpret_cast<const uint8_t *>(frame);
-        const int       size = meta.size_bytes;
+        const int size = meta.size_bytes;
 
-        // Re-inject cached VPS+SPS+PPS before every frame.
-        // Cache is always populated before ST_RUNNING is reached (see above).
-        if (!interface->m_h265_param_cache.empty()) {
+        // Re-inject cached VPS+SPS+PPS every m_param_inject_interval frames so
+        // late-joining subscribers can always latch on within a short window.
+        if (!interface->m_h265_param_cache.empty() &&
+            (interface->m_encoded_frame_count % interface->m_param_inject_interval == 0)) {
             sensor_msgs::msg::CompressedImage ps_msg;
             ps_msg.header.frame_id = interface->ginterface_name;
             ps_msg.header.stamp    = _clock_monotonic_to_ros_time(interface->getNodeHandle(), meta.timestamp_ns);
@@ -400,6 +373,7 @@ static void _frame_cb(
         msg.data.resize(size);
         memcpy(msg.data.data(), frame, size);
         compressed_publisher->publish(msg);
+        interface->m_encoded_frame_count++;
 
     } else {
 

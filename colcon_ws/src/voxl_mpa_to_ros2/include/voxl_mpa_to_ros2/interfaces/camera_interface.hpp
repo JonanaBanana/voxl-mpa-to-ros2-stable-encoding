@@ -77,14 +77,15 @@ public:
     int frame_format;
 
     // Cached SPS+PPS (H264) and VPS+SPS+PPS (H265) packets.
-    // Re-published before every IDR frame so late-joining subscribers
-    // always receive parameter sets within one I-frame interval.
+    // Re-published every m_param_inject_interval frames so late-joining
+    // subscribers always receive parameter sets within a short window.
     std::vector<uint8_t> m_h264_param_cache;
     std::vector<uint8_t> m_h265_param_cache;
+    int m_encoded_frame_count   = 0;  ///< Counts published encoded frames
+    int m_param_inject_interval = 10; ///< Inject param sets every N frames
 
 private:
 
-    sensor_msgs::msg::CompressedImage                     m_compressedImage;   ///< Compressed Image message
     sensor_msgs::msg::Image                     m_imageMsg;                   ///< Image message
     sensor_msgs::msg::CompressedImage           m_compressedImageMsg;         ///< Compressed Image message
     image_transport::Publisher             m_rosImagePublisher;               ///< Image publisher
