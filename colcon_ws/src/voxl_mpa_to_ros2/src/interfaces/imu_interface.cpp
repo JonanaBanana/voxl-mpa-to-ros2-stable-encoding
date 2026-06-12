@@ -110,6 +110,7 @@ static void _helper_cb(__attribute__((unused))int ch, char* data, int bytes, voi
     //publish all the samples
     for(int i=0;i<n_packets;i++){
 
+        
         Eigen::Vector3d gyro, accel;
 
             // rotate to ENU
@@ -127,7 +128,7 @@ static void _helper_cb(__attribute__((unused))int ch, char* data, int bytes, voi
 
         imu.header.stamp = _clock_monotonic_to_ros_time(
             interface->getNodeHandle(),data_array[i].timestamp_ns);
-        imu.angular_velocity.x = gyro[0];
+        imu.angular_velocity.x = data_array[i].gyro_rad[0];
         imu.angular_velocity.y = gyro[1];
         imu.angular_velocity.z = gyro[2];
         imu.linear_acceleration.x = accel[0];
@@ -135,7 +136,6 @@ static void _helper_cb(__attribute__((unused))int ch, char* data, int bytes, voi
         imu.linear_acceleration.z = accel[2];
 
         interface->imu_pub_->publish(imu);
-
     }
 
 
